@@ -210,6 +210,7 @@ X509v3 Subject Alternative Name:
 Both names must be listed (dex.lab.local and your <CONTROL-PLANE-NODE-1-IP>. 
 If the section is empty or absent, regenerate the certificate — the config file wasn't picked up.
 
+![Group membership](docs/screenshots/05-certificate-verification.png)
 
 
 
