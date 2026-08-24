@@ -30,9 +30,14 @@ New-ADUser -Name "Dev User" -SamAccountName "dev.user" `
   -Path "CN=Users,DC=lab,DC=local" `
   -AccountPassword (Read-Host -AsSecureString "Password") -Enabled $true
 ```
-![Users created in Active Directory](docs/screenshots/02-ad-users.png)
+![Users created in Active Directory](docs/screenshots/01-ad-users.png)
 
-### 3. Assign group membership
+### 3. Create the groups and assign group membership
+
+```powershell
+New-ADGroup -Name "k8s-admins" -GroupScope Global -GroupCategory Security -Path "CN=Users,DC=lab,DC=local"
+New-ADGroup -Name "k8s-developers" -GroupScope Global -GroupCategory Security -Path "CN=Users,DC=lab,DC=local"
+```
 
 ```powershell
 Add-ADGroupMember -Identity "k8s-admins" -Members "taha.admin"
@@ -46,4 +51,4 @@ Get-ADGroupMember -Identity "k8s-admins" | Select Name,SamAccountName
 Get-ADGroupMember -Identity "k8s-developers" | Select Name,SamAccountName
 ```
 
-![Group membership](docs/screenshots/03-group-membership.png)
+![Group membership](docs/screenshots/02-ad-groups.png)
