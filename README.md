@@ -98,13 +98,13 @@ users can read the directory by default, which is all Dex requires.
 
 ### 5. Verify the service account can read the directory
 
-Run this from `k8s-control`, not the domain controller. It proves the account
+Run this from your Kubernetes Control Plane Server, not the domain controller. It proves the account
 works from where Dex will actually use it.
 
 You will be prompted for the administrator password of the domain controller. 
 
 ```bash
-ldapsearch -x -H ldap://192.168.x.132:389 \
+ldapsearch -x -H ldap://<YOUR_IP>:389 \
   -D "CN=Dex Service,CN=Users,DC=lab,DC=local" \
   -W \
   -b "CN=Users,DC=lab,DC=local" \
