@@ -195,6 +195,22 @@ openssl req -new -x509 -sha256 -days 3650 -newkey rsa:4096 \
   -config req.cnf -subj "/CN=dex.lab.local" -nodes
 ```
 
+Check before moving on:
+
+```bash
+openssl x509 -in tls.crt -noout -text | grep -A2 "Subject Alternative Name"
+```
+
+Expected output:
+
+```
+X509v3 Subject Alternative Name:
+    DNS:dex.lab.local, IP Address:192.168.79.141
+```
+Both names must be listed (dex.lab.local and your <CONTROL-PLANE-NODE-1-IP>. 
+If the section is empty or absent, regenerate the certificate — the config file wasn't picked up.
+
+
 
 
 
