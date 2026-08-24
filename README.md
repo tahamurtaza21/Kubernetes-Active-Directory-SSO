@@ -118,7 +118,43 @@ dn: CN=Taha Admin,CN=Users,DC=lab,DC=local
 mail: taha.admin@lab.local
 memberOf: CN=k8s-admins,CN=Users,DC=lab,DC=local
 ```
-
 ![Group membership](docs/screenshots/04-ldapsearch.png)
+
+### 6. Point `dex.lab.local` at a node
+
+Dex is exposed as a NodePort service on port 32000, which means the port is
+open on *every* node in the cluster — traffic to any of them reaches the Dex
+pod wherever it happens to be scheduled. So `dex.lab.local` just needs to
+resolve to one node consistently.
+
+**Consistently is the important word.** The API server resolves this name to
+call Dex's OIDC discovery endpoint, and it does so on both control planes. If
+they resolve it differently — or if the name has multiple A records and
+round-robins — authentication succeeds or fails depending on which API server
+the request lands on, with no obvious pattern.
+
+I pointed it at my first control plane node: a control plane is the node
+least likely to be powered off in a lab, and it keeps the entry point on the
+machine I work from. Any node would function.
+
+Add the entry on **all the control planes** — they're the hosts that must have
+it, since the API server is what resolves the name:
+
+```bash
+# On <CONTROL-PLANE-NODE-1> AND <CONTROL-PLANE-NODE-2>
+echo "<CONTROL-PLANE-NODE-1-IP>  dex.lab.local" | sudo tee -a /etc/hosts
+```
+
+Verify on each node. This must return exactly one address, identical on both:
+
+```bash
+getent hosts dex.lab.local
+```
+
+```
+192.168.79.141  dex.lab.local
+```
+
+
 
 
