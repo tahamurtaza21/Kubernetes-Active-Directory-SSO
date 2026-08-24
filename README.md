@@ -54,3 +54,44 @@ Get-ADGroupMember -Identity "k8s-developers" | Select Name,SamAccountName
 ```
 
 ![Group membership](docs/screenshots/02-ad-groups.png)
+
+### 4. Create the Dex service account
+
+This account is different from the two above. It isn't a person, it never logs
+into the cluster, and it belongs to no groups.
+
+**What it does.** Dex needs to look users up in Active Directory before it can
+authenticate them — find the account matching a given username, and read which
+groups that account belongs to. LDAP requires an authenticated connection to
+run those searches, so Dex needs credentials of its own. That's this account.
+
+**What it does not do.** It does not authenticate anyone. When a user logs in,
+two separate LDAP binds happen:
+
+1. Dex binds as `dex-service` and searches for the user
+2. Dex binds again *as that user*, using the password they just typed —
+   if AD accepts it, the password is correct
+
+So the service account is a **directory reader**, not an authenticator. The
+user's password is verified by AD itself, and Dex never stores it.
+
+This is why it needs no privileges beyond directory reads. The upstream Dex
+guide binds as `cn=Administrator`, which hands full domain rights to a
+component that only needs to run searches. A dedicated account means that if
+the Dex config leaks, the credential exposed can read the directory and
+nothing else.
+
+```powershell
+New-ADUser -Name "Dex Service" -SamAccountName "dex-service" `
+  -UserPrincipalName "dex-service@lab.local" `
+  -Path "CN=Users,DC=lab,DC=local" `
+  -AccountPassword (Read-Host -AsSecureString "Password") `
+  -Enabled $true -PasswordNeverExpires $true -CannotChangePassword $true
+```
+
+`-PasswordNeverExpires` and `-CannotChangePassword` are deliberate: this is a
+non-interactive account, and an expired password would silently break every
+cluster login at once. No group membership is added — authenticated domain
+users can read the directory by default, which is all Dex requires.
+
+![Group membership](docs/screenshots/03-ad-dex.png)
