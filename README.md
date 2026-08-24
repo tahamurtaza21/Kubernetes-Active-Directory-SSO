@@ -1,8 +1,10 @@
 # Kubernetes-Active-Directory-SSO
 Kubernetes cluster where kubectl authenticates once against Windows Active Directory using Dex as an OIDC broker. Built and documented on a 4-node (2 control planes and 2 workers) Ubuntu 22.04 home lab.
 
-
 ###
+The lab uses a single Active Directory domain, `lab.local`, running on a
+Windows Server VM. Every command below uses `DC=lab,DC=local` as the base DN —
+substitute your own domain throughout.
 
 ### 1. Create the two AD Groups to verify RBAC
 
