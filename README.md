@@ -207,7 +207,7 @@ Expected output:
 X509v3 Subject Alternative Name:
     DNS:dex.lab.local, IP Address:192.168.79.141
 ```
-Both names must be listed (dex.lab.local and your <CONTROL-PLANE-NODE-1-IP>. 
+Both names must be listed (dex.lab.local and your ***<CONTROL-PLANE-NODE-1-IP>***. 
 If the section is empty or absent, regenerate the certificate — the config file wasn't picked up.
 
 ![Group membership](docs/screenshots/05-certificate-verification.png)
