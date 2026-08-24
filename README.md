@@ -152,7 +152,7 @@ getent hosts dex.lab.local
 ```
 
 ```
-192.168.79.141  dex.lab.local
+<CONTROL-PLANE-NODE-1-IP>  dex.lab.local
 ```
 
 
