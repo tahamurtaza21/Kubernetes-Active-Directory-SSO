@@ -155,6 +155,48 @@ getent hosts dex.lab.local
 <CONTROL-PLANE-NODE-1-IP>  dex.lab.local
 ```
 
+### 7. Generate the Dex certificate
+
+Dex serves HTTPS, so it needs a certificate before it will start.
+
+The OpenSSL config and command below are taken from the
+[upstream Dex guide](https://dexidp.io/docs/guides/kubelogin-activedirectory/),
+with two changes explained underneath.
+
+A certificate is an ID card that says "I am `dex.lab.local`." When something
+connects, TLS checks whether the name it typed matches a name on the card. The
+`[alt_names]` section is that list of names.
+
+**Change 1 — added the node's IP as a second name. This is primarily for debugging purposes** 
+The guide lists the hostname alone... 
+
+When login breaks, you need to know whether the name is the problem or Dex is the problem. Hitting the IP directly skips name resolution entirely — if that works, the name is broken; if it doesn't, Dex is broken.
+
+```bash
+cat > req.cnf <<'EOF'
+[req]
+req_extensions = v3_req
+distinguished_name = req_distinguished_name
+
+[req_distinguished_name]
+
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = dex.lab.local
+IP.1 = <CONTROL-PLANE-NODE-1-IP>
+EOF
+
+openssl req -new -x509 -sha256 -days 3650 -newkey rsa:4096 \
+  -extensions v3_req -out tls.crt -keyout tls.key \
+  -config req.cnf -subj "/CN=dex.lab.local" -nodes
+```
+
+
+
 
 
 
