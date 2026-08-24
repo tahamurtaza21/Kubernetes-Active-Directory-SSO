@@ -212,7 +212,14 @@ If the section is empty or absent, regenerate the certificate — the config fil
 
 ![Group membership](docs/screenshots/05-certificate-verification.png)
 
+### 9. Copy the certificate to both control planes
 
+Ensure that you copy the certificate to /etc/kubernetes/pki/***name-of-certificate.crt***
+
+The API server has to verify Dex's certificate when it calls the OIDC
+discovery endpoint. Dex's certificate is self-signed, so nothing trusts it by
+default — the API server needs to be handed the certificate explicitly and
+told to trust it via `--oidc-ca-file`.
 
 
 
