@@ -2,7 +2,7 @@
 Kubernetes cluster where kubectl authenticates once against Windows Active Directory using Dex as an OIDC broker. Built and documented on a 4-node (2 control planes and 2 workers) Ubuntu 22.04 home lab.
 
 ###
-The lab uses a single Active Directory domain, `lab.local`, running on a
+The lab uses a single Active Directory domain (Windows Server 2019), `lab.local`, running on a
 Windows Server VM. Every command below uses `DC=lab,DC=local` as the base DN —
 substitute your own domain throughout.
 
@@ -95,3 +95,30 @@ cluster login at once. No group membership is added — authenticated domain
 users can read the directory by default, which is all Dex requires.
 
 ![Group membership](docs/screenshots/03-ad-dex.png)
+
+### 5. Verify the service account can read the directory
+
+Run this from `k8s-control`, not the domain controller. It proves the account
+works from where Dex will actually use it.
+
+You will be prompted for the administrator password of the domain controller. 
+
+```bash
+ldapsearch -x -H ldap://192.168.x.132:389 \
+  -D "CN=Dex Service,CN=Users,DC=lab,DC=local" \
+  -W \
+  -b "CN=Users,DC=lab,DC=local" \
+  "(sAMAccountName=taha.admin)" dn mail memberOf
+```
+
+Expected output:
+
+```
+dn: CN=Taha Admin,CN=Users,DC=lab,DC=local
+mail: taha.admin@lab.local
+memberOf: CN=k8s-admins,CN=Users,DC=lab,DC=local
+```
+
+![Group membership](docs/screenshots/04-ldapsearch.png)
+
+
