@@ -223,6 +223,54 @@ discovery endpoint. Dex's certificate is self-signed, so nothing trusts it by
 default — the API server needs to be handed the certificate explicitly and
 told to trust it via `--oidc-ca-file`.
 
+### 10. Create the namespace and secrets
+
+Dex needs two secrets to exist before it starts. It mounts both, and a missing
+one leaves the pod stuck in `ContainerCreating`.
+
+```bash
+kubectl create namespace dex
+```
+
+**TLS secret** — the certificate and key Dex serves HTTPS with.
+
+```bash
+kubectl create secret tls dex-tls \
+  --cert=$HOME/dex-certs/tls.crt \
+  --key=$HOME/dex-certs/tls.key \
+  -n dex
+```
+
+**LDAP bind password** — for the `dex-service` account from step 4.
+
+```bash
+kubectl create secret generic dex-ldap-bind \
+  --from-literal=bindPW='<dex-service password>' \
+  -n dex
+```
+
+Use single quotes, or bash will mangle any `!`, `$`, or `&` in the password.
+
+The password goes in a Secret rather than in the Dex config file so the config
+can be committed to this repo as-is. The upstream guide puts it straight in the
+config, which is fine for a local demo but not for anything in git.
+
+Verify:
+
+```bash
+kubectl get secrets -n dex
+```
+
+```
+NAME             TYPE                DATA   AGE
+dex-ldap-bind    Opaque              1      10s
+dex-tls          kubernetes.io/tls   2      30s
+```
+
+`dex-tls` should be type `kubernetes.io/tls` with 2 keys. If it says `Opaque`,
+it was created with the wrong command.
+
+![Secrets created](docs/screenshots/06-dex-secrets.png)
 
 
 
