@@ -377,4 +377,65 @@ something else pointed at the same endpoint. The value here must match the
 of "example-app-secret"). Since it only has to match on both sides, any string
 works — a real deployment would generate a random one.
 
+### 12. Give Dex permission to manage its own storage
+
+Step 11 set `storage: type: kubernetes`, which means Dex keeps login sessions
+and tokens in the cluster as custom resources rather than in a database. To do
+that it has to create those resource types and read and write them — so it
+needs a ServiceAccount with permissions of its own.
+
+**This has nothing to do with user access.** It's Dex's own housekeeping.
+Mapping AD groups to cluster permissions is a separate step (16), and the two
+are easy to confuse because both involve ClusterRoles.
+
+Save as `manifests/dex/rbac.yaml`:
+
+```yaml
+# The identity the Dex pod runs as.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dex
+  namespace: dex
+---
+# What that identity is allowed to do.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dex
+rules:
+# Full access to Dex's own custom resources — where it stores auth
+# codes, refresh tokens and sessions.
+- apiGroups: ["dex.coreos.com"]
+  resources: ["*"]
+  verbs: ["*"]
+# Permission to create those resource types in the first place.
+# Dex registers them itself on first start.
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["create"]
+---
+# Tie the two together.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dex
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dex
+subjects:
+- kind: ServiceAccount
+  name: dex
+  namespace: dex
+```
+
+Apply it **before** the Deployment. Without it the pod starts, tries to
+register its CRDs, gets refused, and crash-loops with a permissions error that
+looks like a config problem:
+
+```bash
+kubectl apply -f manifests/dex/rbac.yaml
+```
+
 
