@@ -889,52 +889,6 @@ Switching back:
 kubectl config use-context kubernetes-admin@kubernetes
 ```
 
----
-
-## Choices I made
-
-**Dex, not Keycloak.** Keycloak does far more, but needs a database and ongoing care. Dex does one job and holds no state of its own. For a 4-node lab, the smaller tool won.
-
-**CRD storage, not sqlite3.** Dex keeps its auth state in the cluster as custom resources rather than a local database file. sqlite3 pins you to a single replica; CRD storage means Dex stays stateless and could scale out.
-
-**A dedicated read-only service account, not Administrator.** The upstream guide binds as `cn=Administrator`. Dex only needs to search the directory and read `member`, so it gets an account with exactly that and nothing else.
-
-**LDAP on 389, not LDAPS.** LDAPS requires AD Certificate Services on the domain controller, which wasn't installed. Rather than add an untested certificate layer beneath an already multi-part stack, I got the full flow working on 389 first — so that when something broke, I knew which layer it was in. On an isolated lab network with a throwaway service account the exposure is acceptable; on a real network it would not be.
-
-**Two control planes, which means no fault tolerance.** With two, etcd needs both to agree, so losing either takes the cluster down. Two gives rolling upgrades and a realistic multi-master setup to learn on; it does not give HA in the real sense. Three is the minimum for that, and I didn't have the hardware.
-
-**`dex.lab.local` resolves to a single node.** If that node is down, logins fail even though Dex may be running fine elsewhere. A real deployment would put the issuer behind a load balancer or Ingress so the name survives node changes.
-
----
-
-## What I'd change
-
-- A third control plane, so etcd can survive a node failure
-- LDAPS instead of plain LDAP, once AD Certificate Services is in place
-- An Ingress or load balancer in front of Dex, rather than a NodePort pinned to one hostname
-- A generated client secret instead of the upstream guide's placeholder
-- Sealed Secrets for the Dex bind credential rather than a manually created Secret
-
----
-
-## Repo layout
-
-```
-docs/
-  architecture.png
-  screenshots/
-manifests/
-  dex/
-    configmap.yaml
-    rbac.yaml
-    deployment.yaml
-    service.yaml
-  rbac/
-    ad-groups.yaml
-```
-
----
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
