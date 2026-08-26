@@ -534,4 +534,44 @@ The `config connector: ldap` line confirms the connector loaded. If the bind
 credentials are wrong, the error appears here rather than at deploy time.
 
 
+### 14. Expose Dex outside the cluster
+
+Dex is listening on port 5556 inside the pod, which nothing outside the cluster
+can reach. A NodePort service opens a fixed port on every node and forwards it
+to the pod.
+
+Save as `manifests/dex/service.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: dex
+spec:
+  type: NodePort
+  selector:
+    app: dex          # send traffic to pods with this label
+  ports:
+  - name: https
+    port: 5556        # the service's own port
+    targetPort: 5556  # the port Dex listens on in the pod
+    nodePort: 32000   # the port opened on every node
+```
+
+```bash
+kubectl apply -f manifests/dex/service.yaml
+kubectl get svc -n dex
+```
+
+**Why the node port is pinned to 32000.** Left unset, Kubernetes assigns a
+random port from the NodePort range — and that port is part of the issuer URL
+(`https://dex.lab.local:32000/dex`), which is baked into the Dex config, the
+API server flags, and every kubeconfig. A changing port would break all of them
+every time the Service was recreated.
+
+This also explains why the pod's location doesn't matter. NodePort opens 32000
+on *every* node, so traffic to any of them reaches the Dex pod wherever it
+happens to be scheduled. `dex.lab.local` only has to resolve to a node, not to
+the right one.
 
