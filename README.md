@@ -6,8 +6,6 @@ No separate cluster passwords and no shared kubeconfig files — you authenticat
 
 Built and documented on a 4-node home lab (2 control planes, 2 workers) running Ubuntu 22.04, with Dex as the OIDC broker.
 
-![Architecture](docs/architecture.png)
-
 **Based on** the official Dex guide, [Integration kubelogin and Active Directory](https://dexidp.io/docs/guides/kubelogin-activedirectory/). That guide runs Dex as a standalone binary against a single API server with no RBAC. This project adapts it to run Dex inside Kubernetes, across two control planes, with AD group membership mapped to cluster permissions.
 
 ---
