@@ -272,5 +272,645 @@ it was created with the wrong command.
 
 ![Secrets created](docs/screenshots/06-dex-secrets.png)
 
+### 11. Create the Dex config
+
+This tells Dex where Active Directory is, how to find a user, and how to find
+which groups they're in.
+
+Save as `manifests/dex/configmap.yaml`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-config
+  namespace: dex
+data:
+  config.yaml: |
+    # Dex's own address. Must be identical to --oidc-issuer-url on the
+    # API server, or the API server won't trust the tokens Dex issues.
+    issuer: https://dex.lab.local:32000/dex
+
+    # Where Dex saves login sessions. "kubernetes" = store them in the
+    # cluster, so Dex keeps nothing on disk and can restart safely.
+    storage:
+      type: kubernetes
+      config:
+        inCluster: true
+
+    # Dex serves HTTPS. These files come from the dex-tls secret,
+    # mounted at /etc/dex/tls by the Deployment in step 13.
+    web:
+      https: 0.0.0.0:5556
+      tlsCert: /etc/dex/tls/tls.crt
+      tlsKey: /etc/dex/tls/tls.key
+
+    oauth2:
+      # Skip the "allow this app?" page. One less click.
+      skipApprovalScreen: true
+
+    # Which app is allowed to ask Dex for a login. Here, that's kubectl.
+    staticClients:
+    - id: kubernetes
+      name: Kubernetes
+      secret: ZXhhbXBsZS1hcHAtc2VjcmV0
+      # After login, Dex sends the browser back here. kubelogin is
+      # listening on one of these ports on your own machine.
+      redirectURIs:
+      - http://localhost:8000
+      - http://localhost:18000
+      # Needed only for the browser-less login flow — see step 17.
+      - urn:ietf:wg:oauth:2.0:oob
+
+    connectors:
+    - type: ldap
+      id: ldap
+      name: Active Directory
+      config:
+        host: 192.168.79.132:389
+        insecureNoSSL: true    # plain LDAP, not LDAPS
+
+        # The account Dex logs in as to search the directory.
+        # Password comes from the dex-ldap-bind secret that we did earlier, not from here.
+        bindDN: CN=Dex Service,CN=Users,DC=lab,DC=local
+        bindPW: $LDAP_BIND_PW
+
+        # Finding the person logging in.
+        userSearch:
+          baseDN: CN=Users,DC=lab,DC=local   # where to look
+          filter: "(objectClass=user)"       # only look at users
+          username: sAMAccountName           # what they type to log in
+          idAttr: distinguishedName          # their unique id
+          emailAttr: mail                    # becomes their k8s username
+          nameAttr: cn                       # their display name
+
+        # Finding their groups.
+        groupSearch:
+          baseDN: CN=Users,DC=lab,DC=local
+          filter: "(objectClass=group)"      # only look at groups
+          # Match a group if its member list contains this user.
+          userMatchers:
+          - userAttr: distinguishedName
+            groupAttr: member
+          nameAttr: cn                       # token says "k8s-admins",
+                                             # not the full long DN
+```
+
+Apply it:
+
+```bash
+kubectl apply -f manifests/dex/configmap.yaml
+```
+
+**What is that `secret` under staticClients?**
+
+It's a shared password between Dex and kubectl — not an AD password, and
+nothing to do with users.
+
+Dex only issues tokens to applications it recognises. `staticClients` is that
+list, and it has one entry: kubectl. When kubectl exchanges its login code for
+a token, it sends this string to prove it's the app Dex expects rather than
+something else pointed at the same endpoint. The value here must match the
+`--oidc-client-secret` kubectl is configured with in step 17.
+
+`ZXhhbXBsZS1hcHAtc2VjcmV0` is the placeholder from the upstream guide (base64
+of "example-app-secret"). Since it only has to match on both sides, any string
+works — a real deployment would generate a random one.
+
+### 12. Give Dex permission to manage its own storage
+
+Step 11 set `storage: type: kubernetes`, which means Dex keeps login sessions
+and tokens in the cluster as custom resources rather than in a database. To do
+that it has to create those resource types and read and write them — so it
+needs a ServiceAccount with permissions of its own.
+
+**This has nothing to do with user access.** It's Dex's own housekeeping.
+Mapping AD groups to cluster permissions is a separate step (16), and the two
+are easy to confuse because both involve ClusterRoles.
+
+Save as `manifests/dex/rbac.yaml`:
+
+```yaml
+# The identity the Dex pod runs as.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dex
+  namespace: dex
+---
+# What that identity is allowed to do.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dex
+rules:
+# Full access to Dex's own custom resources — where it stores auth
+# codes, refresh tokens and sessions.
+- apiGroups: ["dex.coreos.com"]
+  resources: ["*"]
+  verbs: ["*"]
+# Permission to create those resource types in the first place.
+# Dex registers them itself on first start.
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["create"]
+---
+# Tie the two together.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dex
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dex
+subjects:
+- kind: ServiceAccount
+  name: dex
+  namespace: dex
+```
+
+Apply it **before** the Deployment. Without it the pod starts, tries to
+register its CRDs, gets refused, and crash-loops with a permissions error that
+looks like a config problem:
+
+```bash
+kubectl apply -f manifests/dex/rbac.yaml
+```
+
+### 13. Deploy Dex
+
+This is where everything created so far gets wired together: the config from
+step 11, the two secrets from step 10, and the ServiceAccount from step 12.
+
+Save as `manifests/dex/deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: dex
+  labels:
+    app: dex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+    spec:
+      # The identity from step 12, so Dex can manage its own CRDs.
+      serviceAccountName: dex
+      containers:
+      - name: dex
+        image: ghcr.io/dexidp/dex:v2.37.0
+        # Point Dex at the config file mounted below.
+        command: ["/usr/local/bin/dex", "serve", "/etc/dex/cfg/config.yaml"]
+        ports:
+        - name: https
+          containerPort: 5556
+        env:
+        # This is what $LDAP_BIND_PW in the config expands to.
+        # Dex reads it from the environment at startup, so the
+        # password never appears in the ConfigMap.
+        - name: LDAP_BIND_PW
+          valueFrom:
+            secretKeyRef:
+              name: dex-ldap-bind
+              key: bindPW
+        volumeMounts:
+        # config.yaml lands at /etc/dex/cfg/config.yaml
+        - name: config
+          mountPath: /etc/dex/cfg
+        # tls.crt and tls.key land in /etc/dex/tls/
+        - name: tls
+          mountPath: /etc/dex/tls
+      volumes:
+      - name: config
+        configMap:
+          name: dex-config
+      - name: tls
+        secret:
+          secretName: dex-tls
+```
+
+```bash
+kubectl apply -f manifests/dex/deployment.yaml
+kubectl get pods -n dex -w
+```
+
+**How the file paths work.** Nothing is built into the image — the config and
+certificate are mounted in at runtime. A ConfigMap or Secret is a set of
+key-value pairs, and mounting one as a volume turns each key into a file. The
+`dex-tls` secret has keys `tls.crt` and `tls.key`, so mounting it at
+`/etc/dex/tls` produces `/etc/dex/tls/tls.crt` and `/etc/dex/tls/tls.key` —
+exactly the paths written in the config in step 11. Change a `mountPath` here
+and the config has to change to match, or Dex exits with "no such file or
+directory".
+
+**Check the logs, not just the pod status.** A Running pod only means the
+container started; the LDAP connection is made lazily and problems show up
+here:
+
+```bash
+kubectl logs -n dex deploy/dex
+```
+
+A healthy start looks roughly like:
+
+```
+level=info msg="config using log level: info"
+level=info msg="config issuer: https://dex.lab.local:32000/dex"
+level=info msg="config storage: kubernetes"
+level=info msg="config connector: ldap"
+level=info msg="listening (https) on 0.0.0.0:5556"
+```
+
+The `config connector: ldap` line confirms the connector loaded. If the bind
+credentials are wrong, the error appears here rather than at deploy time.
 
 
+### 14. Expose Dex outside the cluster
+
+Dex is listening on port 5556 inside the pod, which nothing outside the cluster
+can reach. A NodePort service opens a fixed port on every node and forwards it
+to the pod.
+
+Save as `manifests/dex/service.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: dex
+spec:
+  type: NodePort
+  selector:
+    app: dex          # send traffic to pods with this label
+  ports:
+  - name: https
+    port: 5556        # the service's own port
+    targetPort: 5556  # the port Dex listens on in the pod
+    nodePort: 32000   # the port opened on every node
+```
+
+```bash
+kubectl apply -f manifests/dex/service.yaml
+kubectl get svc -n dex
+```
+
+**Why the node port is pinned to 32000.** Left unset, Kubernetes assigns a
+random port from the NodePort range — and that port is part of the issuer URL
+(`https://dex.lab.local:32000/dex`), which is baked into the Dex config, the
+API server flags, and every kubeconfig. A changing port would break all of them
+every time the Service was recreated.
+
+This also explains why the pod's location doesn't matter. NodePort opens 32000
+on *every* node, so traffic to any of them reaches the Dex pod wherever it
+happens to be scheduled. `dex.lab.local` only has to resolve to a node, not to
+the right one.
+
+### 15. Point the API server at Dex
+
+Kubernetes doesn't know Dex exists yet. These flags tell the API server to
+accept tokens issued by it.
+
+The five flags below come from the
+[upstream Dex guide](https://dexidp.io/docs/guides/kubelogin-activedirectory/),
+with two changes: the hostname is `dex.lab.local` rather than the guide's
+`dex.example.com`, and `--oidc-ca-file` points at
+`/etc/kubernetes/pki/dex-ca.crt` instead of `/etc/ssl/certs/openid-ca.pem`.
+
+That second change matters more than it looks. `/etc/kubernetes/pki` is already
+mounted into the API server container by kubeadm, so a certificate placed there
+is visible to the process. `/etc/ssl/certs` is not mounted, so the guide's path
+only works when the API server runs directly on the host — which is what the
+guide assumes. On a kubeadm cluster it silently points at nothing.
+
+The guide also says "restart API server(s)" and moves on, without mentioning
+that every control plane needs the same flags and the same certificate file.
+
+Edit the manifest on **`k8s-control`** first:
+
+```bash
+sudo nano /etc/kubernetes/manifests/kube-apiserver.yaml
+```
+
+Add these under `spec.containers[0].command`, alongside the other flags:
+
+```yaml
+    # Where to fetch Dex's signing keys. Must match the "issuer" in
+    # the discovery JSON exactly — no trailing slash.
+    - --oidc-issuer-url=https://dex.lab.local:32000/dex
+    # Only accept tokens issued for this client.
+    - --oidc-client-id=kubernetes
+    # Dex's certificate is self-signed, so the API server has to be
+    # told to trust it. This is the file copied in step 9.
+    - --oidc-ca-file=/etc/kubernetes/pki/dex-ca.crt
+    # Which claim in the token becomes the Kubernetes username.
+    - --oidc-username-claim=email
+    # Which claim carries group membership, for RBAC to match on.
+    - --oidc-groups-claim=groups
+```
+
+Indentation must line up with the existing flags, or the API server won't
+start.
+
+Save. The kubelet notices the manifest changed and recreates the API server
+pod on its own. Wait about 30 seconds, then:
+
+```bash
+kubectl get nodes
+```
+
+**Only once that returns healthy, repeat on `k8s-control2`.** One node at a
+time — breaking both API servers simultaneously means losing the cluster, and
+the admin context can't help if there's no API server left to talk to.
+
+**Both control planes need identical flags.** If only one has them, the other
+API server has no idea Dex exists, and authentication succeeds or fails
+depending on which one the request reaches. That looks intermittent rather than
+broken, which is much harder to diagnose than a clean failure.
+
+Verify on each node:
+
+```bash
+sudo grep -c oidc /etc/kubernetes/manifests/kube-apiserver.yaml   # expect 5
+sudo md5sum /etc/kubernetes/pki/dex-ca.crt                         # must match
+getent hosts dex.lab.local                                         # must resolve
+```
+
+### 16. Map AD groups to cluster permissions
+
+At this point a user can log in, but they can't do anything. Authentication and
+authorisation are separate: Dex proves who you are, RBAC decides what you're
+allowed to do. Nothing has told Kubernetes what an AD group means yet.
+
+**Do this before switching kubectl over.** Cut across to the OIDC user first
+and you authenticate successfully as someone with zero permissions — including
+no permission to create the bindings that would fix it. That's a real lockout,
+and it's [what happened the first time](#things-that-broke). The upstream guide
+never mentions RBAC at all.
+
+Save as `manifests/rbac/ad-groups.yaml`:
+
+```yaml
+# Anyone in the k8s-admins AD group gets full cluster access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ad-k8s-admins
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin        # built-in role, nothing to define
+subjects:
+- kind: Group                # matches a group claim in the token,
+  name: k8s-admins           # not a Kubernetes object
+  apiGroup: rbac.authorization.k8s.io
+---
+# Anyone in k8s-developers gets read-only access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ad-k8s-developers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view                 # built-in read-only role
+subjects:
+- kind: Group
+  name: k8s-developers
+  apiGroup: rbac.authorization.k8s.io
+```
+
+```bash
+kubectl apply -f manifests/rbac/ad-groups.yaml
+kubectl get clusterrolebinding | grep ad-k8s
+```
+
+**Why the short name and not the full DN.** `kind: Group` here matches a string
+in the token's `groups` claim — there's no Kubernetes object called
+`k8s-admins`, and RBAC never talks to Active Directory. The token carries
+`k8s-admins` rather than `CN=k8s-admins,CN=Users,DC=lab,DC=local` because the
+Dex config sets `nameAttr: cn` under `groupSearch` (step 11). Drop that setting
+and the token carries the full DN, these bindings match nothing, and users
+authenticate fine with no permissions — which looks identical to the lockout
+above and is diagnosed very differently.
+
+### 17. Install kubelogin
+
+kubectl can't perform a browser login on its own. **kubelogin** is a plugin
+that handles the OIDC flow — it opens the browser, receives the token, and
+caches it so you're not logging in on every command.
+
+```bash
+cd /tmp
+curl -LO https://github.com/int128/kubelogin/releases/latest/download/kubelogin_linux_amd64.zip
+unzip kubelogin_linux_amd64.zip
+sudo install -m 755 kubelogin /usr/local/bin/kubectl-oidc_login
+```
+
+**The filename matters.** kubectl finds plugins by looking for an executable
+named after the subcommand, so `kubectl oidc-login` requires a binary called
+`kubectl-oidc_login` — hyphen in the command, **underscore** in the filename.
+Installing it as `kubelogin` alone leaves it working standalone but invisible
+to kubectl, which then fails with `unknown command "oidc-login"`.
+
+
+Verify:
+
+```bash
+kubectl oidc-login --version
+```
+
+### 18. Configure kubectl and log in
+
+Add an `oidc` user that calls kubelogin whenever kubectl needs credentials:
+
+```bash
+kubectl config set-credentials oidc \
+  --exec-api-version=client.authentication.k8s.io/v1beta1 \
+  --exec-command=kubectl \
+  --exec-arg=oidc-login \
+  --exec-arg=get-token \
+  --exec-arg=--oidc-issuer-url=https://dex.lab.local:32000/dex \
+  --exec-arg=--oidc-client-id=kubernetes \
+  --exec-arg=--oidc-client-secret=ZXhhbXBsZS1hcHAtc2VjcmV0 \
+  --exec-arg=--oidc-extra-scope=profile \
+  --exec-arg=--oidc-extra-scope=email \
+  --exec-arg=--oidc-extra-scope=groups \
+  --exec-arg=--certificate-authority=$HOME/dex-certs/tls.crt
+```
+
+`--oidc-client-secret` must be byte-identical to the `secret` in the
+`staticClients` block from step 11. `--certificate-authority` points at Dex's
+certificate so kubectl can verify it, the same way the API server does.
+
+**Test without switching context.** `--user=oidc` uses the OIDC identity for a
+single command while leaving the admin context intact, so a misconfiguration
+costs a failed command rather than access to the cluster:
+
+```bash
+kubectl --user=oidc get nodes
+```
+
+A browser window opens on the Dex login page. Log in as `taha.admin@lab.local`
+with the AD password. The browser shows **Authenticated**, kubectl receives the
+token, and the command completes.
+
+> Run this from a machine with a desktop. Over a plain SSH session there's no
+> display for the browser to open on, and kubelogin fails with
+> `could not open the browser`.
+
+
+#### Verify the identity and groups
+
+```bash
+kubectl --user=oidc auth whoami
+```
+![Secrets created](docs/screenshots/07-login-screen.png)
+
+Expected:
+
+![Secrets created](docs/screenshots/08-succeeded-screen.png)
+
+```
+ATTRIBUTE   VALUE
+Username    taha.admin@lab.local
+Groups      [k8s-admins system:authenticated]
+```
+
+This is the check that matters. The username confirms `emailAttr: mail` fed
+through to `--oidc-username-claim=email`, and `k8s-admins` confirms the LDAP
+group search worked and the claim reached RBAC. A username with no groups means
+`groupSearch` is misconfigured — see step 11 on `member` versus `memberOf`.
+
+#### Prove the two groups actually differ
+
+One user proves login works. Two prove the permissions model works:
+
+```bash
+# as taha.admin (k8s-admins)
+kubectl --user=oidc auth can-i delete pods --all-namespaces
+# yes
+
+# switch users — clear the cached token first
+rm -rf ~/.kube/cache/oidc-login
+
+# log in as dev.user (k8s-developers)
+kubectl --user=oidc get pods -A             # works, read-only
+kubectl --user=oidc auth can-i delete pods  # no
+```
+
+### 19. Create a context so OIDC is the default
+
+Passing `--user=oidc` on every command gets old fast, and it's easy to forget —
+at which point kubectl silently falls back to the admin certificate and you're
+testing nothing. A context makes the OIDC identity the default.
+
+A context is just a named pairing of a cluster, a user, and a namespace.
+
+```bash
+kubectl config set-context oidc-context \
+  --cluster=kubernetes \
+  --user=oidc
+
+kubectl config use-context oidc-context
+```
+
+Check the cluster name matches yours first — `kubernetes` is the kubeadm
+default, and a mismatch produces a context that points nowhere:
+
+```bash
+kubectl config get-clusters
+```
+
+Now plain commands use the AD login:
+
+```bash
+kubectl get nodes
+kubectl auth whoami
+```
+
+**Check what you're actually running as** whenever something behaves
+unexpectedly. Half of all confusing RBAC results turn out to be the wrong
+context:
+
+```bash
+kubectl config current-context
+kubectl auth whoami
+```
+
+`auth whoami` is the reliable one — `current-context` shows what's selected,
+`auth whoami` shows who the API server actually resolved you as.
+
+#### Keep the admin context
+
+**Do not delete `kubernetes-admin@kubernetes`.** It authenticates with a client
+certificate and belongs to `system:masters`, which bypasses RBAC entirely — so
+it keeps working when Dex is down, the API server flags are wrong, or the RBAC
+bindings are broken. It's the way back in, and it should be treated like a root
+password.
+
+```bash
+kubectl config get-contexts
+```
+
+```
+CURRENT   NAME                          CLUSTER      AUTHINFO
+*         oidc-context                  kubernetes   oidc
+          kubernetes-admin@kubernetes   kubernetes   kubernetes-admin
+```
+
+Switching back when something breaks:
+
+```bash
+kubectl config use-context kubernetes-admin@kubernetes
+```
+
+That single command is what recovers from the lockout described in
+[Things that broke](#things-that-broke).
+
+#### What this actually achieves
+
+With the context set, everyone who runs `kubectl` against this cluster is
+authenticated as themselves and authorised by their AD group — no shared
+credentials, no per-user setup on the cluster.
+
+| AD group | Kubernetes role | What they can do |
+|---|---|---|
+| `k8s-admins` | `cluster-admin` | Everything — create, delete, modify any resource in any namespace |
+| `k8s-developers` | `view` | Read-only — list and describe resources, but no create, delete or modify |
+| *(no group)* | none | Authenticates successfully, then can do nothing at all |
+
+That last row is worth understanding. Logging in and having permissions are
+separate things: a valid AD user in neither group gets a token, the API server
+accepts it, and every command returns `Forbidden`. Access is granted by group
+membership, not by having an account.
+
+Which means access is managed entirely in Active Directory:
+
+- **Granting access** — add the person to `k8s-developers` in AD. Nothing
+  changes on the cluster.
+- **Promoting someone** — move them from `k8s-developers` to `k8s-admins` in
+  AD. Takes effect on their next login.
+- **Revoking access** — remove them from the group, or disable their AD
+  account. Their existing token expires and no new one is issued.
+
+Compare that to the default, where everyone shares a copy of
+`/etc/kubernetes/admin.conf`: full cluster-admin for anyone holding the file,
+no record of who did what, and no way to revoke one person without reissuing
+certificates for everyone.
+
+Here, actions are attributed to the actual user:
+
+```bash
+kubectl get events -A
+# attributed to taha.admin@lab.local, not "kubernetes-admin"
+```
