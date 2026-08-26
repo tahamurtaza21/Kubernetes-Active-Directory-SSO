@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: dex
+  labels:
+    app: dex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+    spec:
+      serviceAccountName: dex
+      containers:
+      - name: dex
+        image: ghcr.io/dexidp/dex:v2.37.0
+        command: ["/usr/local/bin/dex", "serve", "/etc/dex/cfg/config.yaml"]
+        ports:
+        - name: https
+          containerPort: 5556
+        env:
+        # This is what $LDAP_BIND_PW in the config expands to
+        - name: LDAP_BIND_PW
+          valueFrom:
+            secretKeyRef:
+              name: dex-ldap-bind
+              key: bindPW
+        volumeMounts:
+        - name: config
+          mountPath: /etc/dex/cfg
+        - name: tls
+          mountPath: /etc/dex/tls
+      volumes:
+      - name: config
+        configMap:
+          name: dex-config
+      - name: tls
+        secret:
+          secretName: dex-tls
