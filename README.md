@@ -729,3 +729,188 @@ Verify:
 kubectl oidc-login --version
 ```
 
+### 18. Configure kubectl and log in
+
+Add an `oidc` user that calls kubelogin whenever kubectl needs credentials:
+
+```bash
+kubectl config set-credentials oidc \
+  --exec-api-version=client.authentication.k8s.io/v1beta1 \
+  --exec-command=kubectl \
+  --exec-arg=oidc-login \
+  --exec-arg=get-token \
+  --exec-arg=--oidc-issuer-url=https://dex.lab.local:32000/dex \
+  --exec-arg=--oidc-client-id=kubernetes \
+  --exec-arg=--oidc-client-secret=ZXhhbXBsZS1hcHAtc2VjcmV0 \
+  --exec-arg=--oidc-extra-scope=profile \
+  --exec-arg=--oidc-extra-scope=email \
+  --exec-arg=--oidc-extra-scope=groups \
+  --exec-arg=--certificate-authority=$HOME/dex-certs/tls.crt
+```
+
+`--oidc-client-secret` must be byte-identical to the `secret` in the
+`staticClients` block from step 11. `--certificate-authority` points at Dex's
+certificate so kubectl can verify it, the same way the API server does.
+
+**Test without switching context.** `--user=oidc` uses the OIDC identity for a
+single command while leaving the admin context intact, so a misconfiguration
+costs a failed command rather than access to the cluster:
+
+```bash
+kubectl --user=oidc get nodes
+```
+
+A browser window opens on the Dex login page. Log in as `taha.admin@lab.local`
+with the AD password. The browser shows **Authenticated**, kubectl receives the
+token, and the command completes.
+
+> Run this from a machine with a desktop. Over a plain SSH session there's no
+> display for the browser to open on, and kubelogin fails with
+> `could not open the browser`.
+
+
+#### Verify the identity and groups
+
+```bash
+kubectl --user=oidc auth whoami
+```
+![Secrets created](docs/screenshots/07-login-screen.png)
+
+Expected:
+
+![Secrets created](docs/screenshots/08-succeeded-screen.png)
+
+```
+ATTRIBUTE   VALUE
+Username    taha.admin@lab.local
+Groups      [k8s-admins system:authenticated]
+```
+
+This is the check that matters. The username confirms `emailAttr: mail` fed
+through to `--oidc-username-claim=email`, and `k8s-admins` confirms the LDAP
+group search worked and the claim reached RBAC. A username with no groups means
+`groupSearch` is misconfigured — see step 11 on `member` versus `memberOf`.
+
+#### Prove the two groups actually differ
+
+One user proves login works. Two prove the permissions model works:
+
+```bash
+# as taha.admin (k8s-admins)
+kubectl --user=oidc auth can-i delete pods --all-namespaces
+# yes
+
+# switch users — clear the cached token first
+rm -rf ~/.kube/cache/oidc-login
+
+# log in as dev.user (k8s-developers)
+kubectl --user=oidc get pods -A             # works, read-only
+kubectl --user=oidc auth can-i delete pods  # no
+```
+
+### 19. Create a context so OIDC is the default
+
+Passing `--user=oidc` on every command gets old fast, and it's easy to forget —
+at which point kubectl silently falls back to the admin certificate and you're
+testing nothing. A context makes the OIDC identity the default.
+
+A context is just a named pairing of a cluster, a user, and a namespace.
+
+```bash
+kubectl config set-context oidc-context \
+  --cluster=kubernetes \
+  --user=oidc
+
+kubectl config use-context oidc-context
+```
+
+Check the cluster name matches yours first — `kubernetes` is the kubeadm
+default, and a mismatch produces a context that points nowhere:
+
+```bash
+kubectl config get-clusters
+```
+
+Now plain commands use the AD login:
+
+```bash
+kubectl get nodes
+kubectl auth whoami
+```
+
+**Check what you're actually running as** whenever something behaves
+unexpectedly. Half of all confusing RBAC results turn out to be the wrong
+context:
+
+```bash
+kubectl config current-context
+kubectl auth whoami
+```
+
+`auth whoami` is the reliable one — `current-context` shows what's selected,
+`auth whoami` shows who the API server actually resolved you as.
+
+#### Keep the admin context
+
+**Do not delete `kubernetes-admin@kubernetes`.** It authenticates with a client
+certificate and belongs to `system:masters`, which bypasses RBAC entirely — so
+it keeps working when Dex is down, the API server flags are wrong, or the RBAC
+bindings are broken. It's the way back in, and it should be treated like a root
+password.
+
+```bash
+kubectl config get-contexts
+```
+
+```
+CURRENT   NAME                          CLUSTER      AUTHINFO
+*         oidc-context                  kubernetes   oidc
+          kubernetes-admin@kubernetes   kubernetes   kubernetes-admin
+```
+
+Switching back when something breaks:
+
+```bash
+kubectl config use-context kubernetes-admin@kubernetes
+```
+
+That single command is what recovers from the lockout described in
+[Things that broke](#things-that-broke).
+
+#### What this actually achieves
+
+With the context set, everyone who runs `kubectl` against this cluster is
+authenticated as themselves and authorised by their AD group — no shared
+credentials, no per-user setup on the cluster.
+
+| AD group | Kubernetes role | What they can do |
+|---|---|---|
+| `k8s-admins` | `cluster-admin` | Everything — create, delete, modify any resource in any namespace |
+| `k8s-developers` | `view` | Read-only — list and describe resources, but no create, delete or modify |
+| *(no group)* | none | Authenticates successfully, then can do nothing at all |
+
+That last row is worth understanding. Logging in and having permissions are
+separate things: a valid AD user in neither group gets a token, the API server
+accepts it, and every command returns `Forbidden`. Access is granted by group
+membership, not by having an account.
+
+Which means access is managed entirely in Active Directory:
+
+- **Granting access** — add the person to `k8s-developers` in AD. Nothing
+  changes on the cluster.
+- **Promoting someone** — move them from `k8s-developers` to `k8s-admins` in
+  AD. Takes effect on their next login.
+- **Revoking access** — remove them from the group, or disable their AD
+  account. Their existing token expires and no new one is issued.
+
+Compare that to the default, where everyone shares a copy of
+`/etc/kubernetes/admin.conf`: full cluster-admin for anyone holding the file,
+no record of who did what, and no way to revoke one person without reissuing
+certificates for everyone.
+
+Here, actions are attributed to the actual user:
+
+```bash
+kubectl get events -A
+# attributed to taha.admin@lab.local, not "kubernetes-admin"
+```
