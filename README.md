@@ -272,5 +272,109 @@ it was created with the wrong command.
 
 ![Secrets created](docs/screenshots/06-dex-secrets.png)
 
+### 11. Create the Dex config
+
+This tells Dex where Active Directory is, how to find a user, and how to find
+which groups they're in.
+
+Save as `manifests/dex/configmap.yaml`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-config
+  namespace: dex
+data:
+  config.yaml: |
+    # Dex's own address. Must be identical to --oidc-issuer-url on the
+    # API server, or the API server won't trust the tokens Dex issues.
+    issuer: https://dex.lab.local:32000/dex
+
+    # Where Dex saves login sessions. "kubernetes" = store them in the
+    # cluster, so Dex keeps nothing on disk and can restart safely.
+    storage:
+      type: kubernetes
+      config:
+        inCluster: true
+
+    # Dex serves HTTPS. These files come from the dex-tls secret,
+    # mounted at /etc/dex/tls by the Deployment in step 13.
+    web:
+      https: 0.0.0.0:5556
+      tlsCert: /etc/dex/tls/tls.crt
+      tlsKey: /etc/dex/tls/tls.key
+
+    oauth2:
+      # Skip the "allow this app?" page. One less click.
+      skipApprovalScreen: true
+
+    # Which app is allowed to ask Dex for a login. Here, that's kubectl.
+    staticClients:
+    - id: kubernetes
+      name: Kubernetes
+      secret: ZXhhbXBsZS1hcHAtc2VjcmV0
+      # After login, Dex sends the browser back here. kubelogin is
+      # listening on one of these ports on your own machine.
+      redirectURIs:
+      - http://localhost:8000
+      - http://localhost:18000
+      # Needed only for the browser-less login flow — see step 17.
+      - urn:ietf:wg:oauth:2.0:oob
+
+    connectors:
+    - type: ldap
+      id: ldap
+      name: Active Directory
+      config:
+        host: 192.168.79.132:389
+        insecureNoSSL: true    # plain LDAP, not LDAPS
+
+        # The account Dex logs in as to search the directory.
+        # Password comes from the dex-ldap-bind secret that we did earlier, not from here.
+        bindDN: CN=Dex Service,CN=Users,DC=lab,DC=local
+        bindPW: $LDAP_BIND_PW
+
+        # Finding the person logging in.
+        userSearch:
+          baseDN: CN=Users,DC=lab,DC=local   # where to look
+          filter: "(objectClass=user)"       # only look at users
+          username: sAMAccountName           # what they type to log in
+          idAttr: distinguishedName          # their unique id
+          emailAttr: mail                    # becomes their k8s username
+          nameAttr: cn                       # their display name
+
+        # Finding their groups.
+        groupSearch:
+          baseDN: CN=Users,DC=lab,DC=local
+          filter: "(objectClass=group)"      # only look at groups
+          # Match a group if its member list contains this user.
+          userMatchers:
+          - userAttr: distinguishedName
+            groupAttr: member
+          nameAttr: cn                       # token says "k8s-admins",
+                                             # not the full long DN
+```
+
+Apply it:
+
+```bash
+kubectl apply -f manifests/dex/configmap.yaml
+```
+
+**What is that `secret` under staticClients?**
+
+It's a shared password between Dex and kubectl — not an AD password, and
+nothing to do with users.
+
+Dex only issues tokens to applications it recognises. `staticClients` is that
+list, and it has one entry: kubectl. When kubectl exchanges its login code for
+a token, it sends this string to prove it's the app Dex expects rather than
+something else pointed at the same endpoint. The value here must match the
+`--oidc-client-secret` kubectl is configured with in step 17.
+
+`ZXhhbXBsZS1hcHAtc2VjcmV0` is the placeholder from the upstream guide (base64
+of "example-app-secret"). Since it only has to match on both sides, any string
+works — a real deployment would generate a random one.
 
 
