@@ -438,4 +438,100 @@ looks like a config problem:
 kubectl apply -f manifests/dex/rbac.yaml
 ```
 
+### 13. Deploy Dex
+
+This is where everything created so far gets wired together: the config from
+step 11, the two secrets from step 10, and the ServiceAccount from step 12.
+
+Save as `manifests/dex/deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: dex
+  labels:
+    app: dex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+    spec:
+      # The identity from step 12, so Dex can manage its own CRDs.
+      serviceAccountName: dex
+      containers:
+      - name: dex
+        image: ghcr.io/dexidp/dex:v2.37.0
+        # Point Dex at the config file mounted below.
+        command: ["/usr/local/bin/dex", "serve", "/etc/dex/cfg/config.yaml"]
+        ports:
+        - name: https
+          containerPort: 5556
+        env:
+        # This is what $LDAP_BIND_PW in the config expands to.
+        # Dex reads it from the environment at startup, so the
+        # password never appears in the ConfigMap.
+        - name: LDAP_BIND_PW
+          valueFrom:
+            secretKeyRef:
+              name: dex-ldap-bind
+              key: bindPW
+        volumeMounts:
+        # config.yaml lands at /etc/dex/cfg/config.yaml
+        - name: config
+          mountPath: /etc/dex/cfg
+        # tls.crt and tls.key land in /etc/dex/tls/
+        - name: tls
+          mountPath: /etc/dex/tls
+      volumes:
+      - name: config
+        configMap:
+          name: dex-config
+      - name: tls
+        secret:
+          secretName: dex-tls
+```
+
+```bash
+kubectl apply -f manifests/dex/deployment.yaml
+kubectl get pods -n dex -w
+```
+
+**How the file paths work.** Nothing is built into the image — the config and
+certificate are mounted in at runtime. A ConfigMap or Secret is a set of
+key-value pairs, and mounting one as a volume turns each key into a file. The
+`dex-tls` secret has keys `tls.crt` and `tls.key`, so mounting it at
+`/etc/dex/tls` produces `/etc/dex/tls/tls.crt` and `/etc/dex/tls/tls.key` —
+exactly the paths written in the config in step 11. Change a `mountPath` here
+and the config has to change to match, or Dex exits with "no such file or
+directory".
+
+**Check the logs, not just the pod status.** A Running pod only means the
+container started; the LDAP connection is made lazily and problems show up
+here:
+
+```bash
+kubectl logs -n dex deploy/dex
+```
+
+A healthy start looks roughly like:
+
+```
+level=info msg="config using log level: info"
+level=info msg="config issuer: https://dex.lab.local:32000/dex"
+level=info msg="config storage: kubernetes"
+level=info msg="config connector: ldap"
+level=info msg="listening (https) on 0.0.0.0:5556"
+```
+
+The `config connector: ldap` line confirms the connector loaded. If the bind
+credentials are wrong, the error appears here rather than at deploy time.
+
+
 
