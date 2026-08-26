@@ -575,3 +575,73 @@ on *every* node, so traffic to any of them reaches the Dex pod wherever it
 happens to be scheduled. `dex.lab.local` only has to resolve to a node, not to
 the right one.
 
+### 15. Point the API server at Dex
+
+Kubernetes doesn't know Dex exists yet. These flags tell the API server to
+accept tokens issued by it.
+
+The five flags below come from the
+[upstream Dex guide](https://dexidp.io/docs/guides/kubelogin-activedirectory/),
+with two changes: the hostname is `dex.lab.local` rather than the guide's
+`dex.example.com`, and `--oidc-ca-file` points at
+`/etc/kubernetes/pki/dex-ca.crt` instead of `/etc/ssl/certs/openid-ca.pem`.
+
+That second change matters more than it looks. `/etc/kubernetes/pki` is already
+mounted into the API server container by kubeadm, so a certificate placed there
+is visible to the process. `/etc/ssl/certs` is not mounted, so the guide's path
+only works when the API server runs directly on the host — which is what the
+guide assumes. On a kubeadm cluster it silently points at nothing.
+
+The guide also says "restart API server(s)" and moves on, without mentioning
+that every control plane needs the same flags and the same certificate file.
+
+Edit the manifest on **`k8s-control`** first:
+
+```bash
+sudo nano /etc/kubernetes/manifests/kube-apiserver.yaml
+```
+
+Add these under `spec.containers[0].command`, alongside the other flags:
+
+```yaml
+    # Where to fetch Dex's signing keys. Must match the "issuer" in
+    # the discovery JSON exactly — no trailing slash.
+    - --oidc-issuer-url=https://dex.lab.local:32000/dex
+    # Only accept tokens issued for this client.
+    - --oidc-client-id=kubernetes
+    # Dex's certificate is self-signed, so the API server has to be
+    # told to trust it. This is the file copied in step 9.
+    - --oidc-ca-file=/etc/kubernetes/pki/dex-ca.crt
+    # Which claim in the token becomes the Kubernetes username.
+    - --oidc-username-claim=email
+    # Which claim carries group membership, for RBAC to match on.
+    - --oidc-groups-claim=groups
+```
+
+Indentation must line up with the existing flags, or the API server won't
+start.
+
+Save. The kubelet notices the manifest changed and recreates the API server
+pod on its own. Wait about 30 seconds, then:
+
+```bash
+kubectl get nodes
+```
+
+**Only once that returns healthy, repeat on `k8s-control2`.** One node at a
+time — breaking both API servers simultaneously means losing the cluster, and
+the admin context can't help if there's no API server left to talk to.
+
+**Both control planes need identical flags.** If only one has them, the other
+API server has no idea Dex exists, and authentication succeeds or fails
+depending on which one the request reaches. That looks intermittent rather than
+broken, which is much harder to diagnose than a clean failure.
+
+Verify on each node:
+
+```bash
+sudo grep -c oidc /etc/kubernetes/manifests/kube-apiserver.yaml   # expect 5
+sudo md5sum /etc/kubernetes/pki/dex-ca.crt                         # must match
+getent hosts dex.lab.local                                         # must resolve
+```
+
