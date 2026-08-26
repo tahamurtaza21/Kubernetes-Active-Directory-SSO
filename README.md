@@ -1,4 +1,4 @@
-# Kubernetes Active Directory SSO
+# Kubernetes Active Directory SSO - Done with help from Claude
 
 Log into a Kubernetes cluster using your existing Windows Active Directory account.
 
