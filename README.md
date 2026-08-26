@@ -702,3 +702,30 @@ Dex config sets `nameAttr: cn` under `groupSearch` (step 11). Drop that setting
 and the token carries the full DN, these bindings match nothing, and users
 authenticate fine with no permissions — which looks identical to the lockout
 above and is diagnosed very differently.
+
+### 17. Install kubelogin
+
+kubectl can't perform a browser login on its own. **kubelogin** is a plugin
+that handles the OIDC flow — it opens the browser, receives the token, and
+caches it so you're not logging in on every command.
+
+```bash
+cd /tmp
+curl -LO https://github.com/int128/kubelogin/releases/latest/download/kubelogin_linux_amd64.zip
+unzip kubelogin_linux_amd64.zip
+sudo install -m 755 kubelogin /usr/local/bin/kubectl-oidc_login
+```
+
+**The filename matters.** kubectl finds plugins by looking for an executable
+named after the subcommand, so `kubectl oidc-login` requires a binary called
+`kubectl-oidc_login` — hyphen in the command, **underscore** in the filename.
+Installing it as `kubelogin` alone leaves it working standalone but invisible
+to kubectl, which then fails with `unknown command "oidc-login"`.
+
+
+Verify:
+
+```bash
+kubectl oidc-login --version
+```
+
