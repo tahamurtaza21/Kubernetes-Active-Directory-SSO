@@ -645,3 +645,60 @@ sudo md5sum /etc/kubernetes/pki/dex-ca.crt                         # must match
 getent hosts dex.lab.local                                         # must resolve
 ```
 
+### 16. Map AD groups to cluster permissions
+
+At this point a user can log in, but they can't do anything. Authentication and
+authorisation are separate: Dex proves who you are, RBAC decides what you're
+allowed to do. Nothing has told Kubernetes what an AD group means yet.
+
+**Do this before switching kubectl over.** Cut across to the OIDC user first
+and you authenticate successfully as someone with zero permissions — including
+no permission to create the bindings that would fix it. That's a real lockout,
+and it's [what happened the first time](#things-that-broke). The upstream guide
+never mentions RBAC at all.
+
+Save as `manifests/rbac/ad-groups.yaml`:
+
+```yaml
+# Anyone in the k8s-admins AD group gets full cluster access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ad-k8s-admins
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin        # built-in role, nothing to define
+subjects:
+- kind: Group                # matches a group claim in the token,
+  name: k8s-admins           # not a Kubernetes object
+  apiGroup: rbac.authorization.k8s.io
+---
+# Anyone in k8s-developers gets read-only access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ad-k8s-developers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view                 # built-in read-only role
+subjects:
+- kind: Group
+  name: k8s-developers
+  apiGroup: rbac.authorization.k8s.io
+```
+
+```bash
+kubectl apply -f manifests/rbac/ad-groups.yaml
+kubectl get clusterrolebinding | grep ad-k8s
+```
+
+**Why the short name and not the full DN.** `kind: Group` here matches a string
+in the token's `groups` claim — there's no Kubernetes object called
+`k8s-admins`, and RBAC never talks to Active Directory. The token carries
+`k8s-admins` rather than `CN=k8s-admins,CN=Users,DC=lab,DC=local` because the
+Dex config sets `nameAttr: cn` under `groupSearch` (step 11). Drop that setting
+and the token carries the full DN, these bindings match nothing, and users
+authenticate fine with no permissions — which looks identical to the lockout
+above and is diagnosed very differently.
